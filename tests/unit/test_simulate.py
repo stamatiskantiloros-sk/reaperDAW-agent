@@ -340,9 +340,11 @@ def test_ensure_fx_envelope_creates_once():
     )  # fmt: skip
     out2, _ = apply_ops(out, [EnsureFxEnvelope(track=KICK, fx=FX, param=4)])
     assert out2 == out
-    # an existing envelope (param 1) is left untouched
+    # an existing envelope (param 1) is made active and visible; nothing else changes
     out3, _ = run(EnsureFxEnvelope(track=KICK, fx=FX, param=1))
-    assert out3 == make_snapshot()
+    expected = make_snapshot()
+    next(e for e in expected.track(KICK).envelopes if e.param == 1).visible = True
+    assert out3 == expected
     fail(EnsureFxEnvelope(track=SNARE, fx=FX, param=1), match="not on track")
 
 

@@ -320,7 +320,8 @@ class _Simulator:
     def ensure_fx_envelope(self, o) -> dict:
         t = self.track(o.track)
         fx = self.fx_on_track(t, o.fx)
-        if self.envelope(t, fx, o.param) is None:
+        env = self.envelope(t, fx, o.param)
+        if env is None:
             t.envelopes.append(
                 EnvelopeInfo(
                     kind="fx",
@@ -331,6 +332,9 @@ class _Simulator:
                     visible=True,
                 )
             )
+        else:  # an existing envelope is made active and visible, as ops.EnsureFxEnvelope says
+            env.active = True
+            env.visible = True
         return {}
 
     def insert_envelope_points(self, o) -> dict:

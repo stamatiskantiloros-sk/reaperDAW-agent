@@ -75,9 +75,38 @@ def _translate(value: Any, mapping: dict[str, str]) -> Any:
     return value
 
 
+def _without_point_counts(value: Any) -> Any:
+    """Envelope point counts are not predictable (the snapshot does not list existing points),
+    so verification compares envelope existence, activity and visibility only. Point content is
+    verified by reading the envelope back (Phase 4)."""
+    if isinstance(value, list):
+        return [_without_point_counts(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _without_point_counts(v) for k, v in value.items() if k != "point_count"}
+    return value
+
+
+def _loosen(changes: list[Change]) -> list[Change]:
+    out = []
+    for c in changes:
+        if c.field == "envelopes":
+            c = Change(
+                c.kind,
+                c.guid,
+                c.field,
+                _without_point_counts(c.before),
+                _without_point_counts(c.after),
+            )
+            if c.before == c.after:
+                continue
+        out.append(c)
+    return out
+
+
 def _compare(expected: list[Change], actual: list[Change]) -> list[Change]:
     """Differences between two change lists. A mismatch has before = the value the plan expected
     the field to end with and after = the value it actually ended with."""
+    expected, actual = _loosen(expected), _loosen(actual)
     exp = {(c.kind, c.guid, c.field): c for c in expected}
     act = {(c.kind, c.guid, c.field): c for c in actual}
     out: list[Change] = []
