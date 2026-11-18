@@ -1,0 +1,78 @@
+# Runtime working folders — keep the folder, ignore the churn
+inbox/*
+processing/*
+outbox/*
+failed/*
+archive/*
+logs/*
+!*/.gitkeep
+
+# Atomic-write temp files
+*.tmp
+
+# Bridge runtime state
+bridge/heartbeat.json
+
+# Console runtime: full transcripts, raw stream, mic audio, panel/sidecar state.
+# Ignore everything by default so a new runtime subfolder can't leak; source opts in.
+console/*
+!console/*.py
+!console/*.md
+
+# Machine-specific config (the bridge regenerates this on first run)
+bridge/bridge_config.json
+
+# Editor / agent local settings
+.claude/settings.local.json
+.DS_Store
+
+# dev test venv for skills
+.venvs/
+
+# python bytecode
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local Netlify folder
+.netlify
+
+# Internal dev notes — kept locally, not shipped in the public repo
+MEMORY.md
+MUSICAL_AUTOMATION_SYSTEM_PLAN.md
+HANDOFF.md
+ERRORS.md
+CLAUDE.md
+docs/superpowers/
+
+# Personal kit defaults (user creates their own; do not ship my kit)
+drum-config.json
+
+# User drum-kit map overlay (discovered/added maps; not shipped with the repo)
+skills/drum-apparatus/maps/*
+!skills/drum-apparatus/maps/.gitkeep
+
+# Persistent MIDI renders referenced by REAPER items (by-reference import)
+rendered-midi/
+
+# Nested worktree of the product-page repo (its own git history)
+hawksbill/
+
+# Brand assets are not this repo's to ship. The move happened 2026-09-01: the
+# reaper-daemon identity concept now lives in the site repo at
+# dead-pixel-design-v4/brand-kit/products/reaper-daemon/, junctioned from
+# C:\brand\products\reaper-daemon. The rule stays so a new brand/ does not
+# accumulate here again.
+brand/
+
+# Release/snapshot state written by the daemon, not source
+state/
+
+# Stray archive drops
+*.zip
+.zip
+
+# Instrument library: this machine's saved sounds
+instruments/user.json
+# Song sheets are the user's songs, not repo content
+songs/
