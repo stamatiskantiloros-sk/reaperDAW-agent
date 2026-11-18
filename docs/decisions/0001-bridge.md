@@ -7,8 +7,8 @@ Status: **proposed**, pending Gate 0 · Date: 2026-11-18 · REAPER 7.86 (macOS a
 Phase 0 checks which REAPER bridge to build on: Reaper Daemon (MIT, Lua bridge in REAPER + stdlib Python, file IPC) or ReaperMCP (Apache 2.0, about 180 tools). Evidence in `0001-evidence/`:
 
 - `reaper-daemon-map.md`: code map of Reaper Daemon v3.23.1 (commit b906ce4).
-- `checklist-static.md`: the 12-item checklist answered from code for both bridges. **ReaperMCP was not run live**; its answers are static only.
-- Reaper Daemon was run live on generated fixtures (`scripts/make_fixtures.py`) in a scratch project, with all write gates off.
+- `checklist-static.md`: the 12-item checklist answered from code for both bridges.
+- Both bridges were then run live in the same REAPER 7.86 on generated fixtures (`scripts/make_fixtures.py`), in a scratch project. Reaper Daemon with all write gates off; ReaperMCP's Lua server loaded by hand (its installer was not used).
 
 ## Reaper Daemon in brief
 
@@ -33,18 +33,51 @@ Phase 0 checks which REAPER bridge to build on: Reaper Daemon (MIT, Lua bridge i
 | 11 | Tempo map | Pass | `get_tempo_markers`; bar/beat points are correct across a tempo change. |
 | 12 | Project path, media | Partial | Only the project file name in `get_context`; media via `get_items` `source_file`. No project path. |
 
-Static result for ReaperMCP: 3 yes, 6 partial, 3 no. It addresses everything by integer index with no GUIDs, its undo grouping only labels steps, and it has no set-by-real-unit. Reaper Daemon's static result: 6 yes, 4 partial, 2 no.
+## Live checklist (ReaperMCP)
+
+| # | Item | Result | How / gap |
+| --- | --- | --- | --- |
+| 1 | Read tracks | Partial | `track_get_all`: index, name, colour (r,g,b), folder depth, FX and send counts. No GUID, no parent. |
+| 2 | Rename, recolour | Pass | `track_rename`, `track_set_color`, **by index**. |
+| 3 | Folder depth, move track | Partial | `track_set_folder` writes the raw depth with no neighbour fix-up (a lone `1` left the folder unclosed). No move command. |
+| 4 | Items, takes | Pass | `item_get_all`, `item_take_list` (all takes with `is_active`). Index-addressed. |
+| 5 | Fixed item lanes | No | No command (static). |
+| 6 | Regions, markers | Pass | `marker_get_all` with `region_end`; `marker_add_region`. |
+| 7 | FX list, params | Pass | `fx_get_chain`, `fx_get_params`: **display strings include units** (`100.0 Hz`, `0.0 dB`). No FX GUID. |
+| 8 | Set by real unit | No | `fx_set_param[_by_name]` takes a raw number only; `"-3 dB"` raised a Lua error. |
+| 9 | FX envelope | Pass | `envelope_add_points`, `_get_points`, `_clear_range` all worked, no read-back verification. The create-on-first-write case that fails in Daemon worked here. |
+| 10 | One undo block | No | Three commands left three undo steps. `undo_group_begin/end` only labels; `project_undo_group` refused ("not made by a multi-command tool"). |
+| 11 | Tempo map | Partial | `tempo_list_markers` works (140 bpm at 16 s). No beat-to-seconds conversion command. |
+| 12 | Project path, media | Pass | `project_get_info` returns the `.rpp` path (`file_path`); media via `item_get_all` `source_file`. |
+
+Tally, live: ReaperMCP 6 pass, 3 partial, 3 no. Reaper Daemon 6 pass (counting item 9 as mostly), 4 partial, 2 no.
+
+## Comparison
+
+| Our principle | Reaper Daemon | ReaperMCP |
+| --- | --- | --- |
+| GUIDs, never indices | Yes (tracks, FX in replies) | No, indices everywhere |
+| One plan = one undo step | Yes, `batch` | No |
+| Real-unit control | Yes | No |
+| Dry run | Yes | Not seen |
+| Verified, rollback-safe automation | Yes (with the creation bug) | No verification |
+| Richer reads (takes, colour, path, units) | Thin | Good |
+| Envelope clear | No | Yes |
+| Tool profiles | No (we write our own server) | Yes (`REAPER_MCP_PROFILE`) |
+| Python dependencies | Stdlib only | `mcp[cli]` package |
+
+The three principles that are hardest to retrofit (GUID addressing, one undo step, real units) are Daemon's strengths. Daemon's gaps are additive reads and new handlers; ReaperMCP's would mean reworking addressing and undo across about 180 tools. ReaperMCP's reads (take list with active flag, colour, project file path, unit-bearing display strings, envelope clear) are good references; Apache 2.0 allows adapting them into our own handlers with attribution in a `NOTICE`.
 
 ## Measurements
 
-Per-command round trip is about 57–62 ms, independent of project size, of which about 30 ms is the Lua defer gap (reported in each reply's `timing`). These numbers include starting the Python CLI per call, so an in-process client will be somewhat faster.
+Per-command round trip, independent of project size: Reaper Daemon about 57–62 ms (of which about 30 ms is the Lua defer gap, reported in each reply's `timing`); ReaperMCP about 19–31 ms. **Not like for like:** the Daemon figures include starting its Python CLI for every call, while my ReaperMCP client stayed in one process. The Lua polling floor is similar for both, so an in-process Daemon client should land near ReaperMCP's numbers.
 
-| Project | `get_context` | Full snapshot with Daemon commands |
-| --- | --- | --- |
-| 50 tracks | 58 ms | 3.1 s (52 calls) |
-| 150 tracks | 62 ms | 9.2 s (154 calls) |
+| Project | Daemon: one-call read | Daemon: full snapshot (CLI per call) | ReaperMCP: full snapshot (in-process) |
+| --- | --- | --- | --- |
+| 50 tracks | 58 ms | 3.1 s (52 calls) | 1.6 s (52 calls) |
+| 150 tracks | 62 ms | 9.2 s (154 calls) | 4.6 s (152 calls) |
 
-The cost is call count (one `get_items` per track), not data size. A one-call `agent.snapshot` handler inside REAPER (Phase 1) is required and should bring this near one round trip.
+For both, the cost is call count (one call per track or item), not data size. A one-call `agent.snapshot` handler inside REAPER (Phase 1) is required and should bring this near one round trip.
 
 ## Findings to carry forward
 
@@ -63,4 +96,5 @@ Fork Reaper Daemon, keep it under `upstream/` with the `upstream` remote, and le
 - We inherit a large codebase of which we use about a third; monthly merges stay easy because we do not edit it.
 - We depend on a single-maintainer project (pushed 2026-10-21). If it stalls, the file protocol is small enough to own.
 - Lanes and folder handlers need REAPER 7 API verification against current docs before coding.
-- Open at the gate: ReaperMCP was compared statically only; a live run could be added if you want a second opinion.
+- Borrowing from ReaperMCP (Apache 2.0) needs attribution in a `NOTICE` file. Both bridges can be loaded in one REAPER at once, which is handy for side-by-side checks.
+- Neither bridge has fixed-lane support; that is new work on our side either way.
