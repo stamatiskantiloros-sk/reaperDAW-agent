@@ -10,6 +10,7 @@ dev = ["pytest", "ruff", "lupa"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = ["integration: needs REAPER running with the bridge loaded"]
 
 [tool.ruff]
