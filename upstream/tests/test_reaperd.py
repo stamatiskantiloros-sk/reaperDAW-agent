@@ -1,0 +1,850 @@
+"""Honesty-cluster tests for reaperd.py (2026-07-02 review, Phase 1).
+
+Everything here runs without a live REAPER: a tiny fake bridge thread answers
+where a reply is needed, and send_type is monkeypatched for the eq/setparam
+failure paths. Run: python -m pytest tests -q (from repo root).
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+
+import pytest
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import reaperd  # noqa: E402
+from bridge_fakes import fake_bridge  # noqa: E402  (root fixture: conftest.py)
+
+
+# --- fix 2: send_command hygiene ------------------------------------------
+
+def test_auto_id_has_real_entropy(root):
+    cid, _ = reaperd.send_command({"type": "ping", "payload": {}}, bridge_root=root)
+    assert len(cid.rsplit("-", 1)[-1]) == 16  # token_hex(8)
+
+
+@pytest.mark.parametrize("command_id", ["../escape", "subdir/name", "x..y"])
+def test_unsafe_command_id_is_rejected_before_queue_write(root, command_id):
+    with pytest.raises(ValueError, match="unsafe command id"):
+        reaperd.send_command(
+            {"id": command_id, "type": "ping", "payload": {}}, bridge_root=root
+        )
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_unsafe_command_id_cannot_delete_a_stale_reply_outside_outbox(root):
+    # `../escape` used to make the stale-reply cleanup target root/escape.json.
+    stale = os.path.join(root, "escape.json")
+    with open(stale, "w", encoding="utf-8") as f:
+        f.write("must survive invalid id rejection")
+    with pytest.raises(ValueError, match="unsafe command id"):
+        reaperd.send_command(
+            {"id": "../escape", "type": "ping", "payload": {}}, bridge_root=root
+        )
+    assert os.path.exists(stale)
+
+
+def test_stale_reply_is_not_answered_as_new_result(root):
+    # Old bug: an unread reply with the same id was returned instantly as the
+    # NEW command's result. It must be cleared before send, so with no bridge
+    # running the call times out instead of "succeeding".
+    stale = os.path.join(root, "outbox", "fixed-1.json")
+    with open(stale, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"id": "fixed-1", "ok": True, "data": {"stale": True}}))
+    with pytest.raises(TimeoutError):
+        reaperd.send_command({"id": "fixed-1", "type": "ping", "payload": {}},
+                             wait=True, timeout_ms=300, bridge_root=root)
+    assert not os.path.exists(stale)
+
+
+def test_locked_stale_reply_fails_closed(root, monkeypatch):
+    # Codex gate finding (2026-07-23): if a stale reply exists but cannot be
+    # removed (Windows/OneDrive lock), sending anyway would return the OLD
+    # reply as the new command's result while the new command stays queued.
+    # Must refuse to send, leaving the inbox empty.
+    stale = os.path.join(root, "outbox", "fixed-2.json")
+    with open(stale, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"id": "fixed-2", "ok": True, "data": {"stale": True}}))
+    real_remove = os.remove
+
+    def locked_remove(path, *a, **k):
+        if os.path.abspath(path) == os.path.abspath(stale):
+            raise PermissionError(13, "The process cannot access the file", path)
+        return real_remove(path, *a, **k)
+
+    monkeypatch.setattr(reaperd.os, "remove", locked_remove)
+    with pytest.raises(reaperd.StaleReplyError):
+        reaperd.send_command({"id": "fixed-2", "type": "ping", "payload": {}},
+                             wait=True, timeout_ms=300, bridge_root=root)
+    assert os.listdir(os.path.join(root, "inbox")) == []
+
+
+def test_send_type_reports_locked_stale_reply_as_error(root, monkeypatch):
+    def raise_stale(*a, **k):
+        raise reaperd.StaleReplyError("stale reply locked")
+    monkeypatch.setattr(reaperd, "send_command", raise_stale)
+    res = reaperd.send_type("ping", {}, bridge_root=root)
+    assert res["ok"] is False
+    assert res["error"]["code"] == "STALE_REPLY_LOCKED"
+
+
+def test_transiently_locked_reply_read_is_retried_not_crashed(root, monkeypatch):
+    # Codex gate BLOCKER (2026-07-23): a transient Windows lock on the first
+    # read of a freshly published reply crashed the CLI with exit 1 — which
+    # the verify contract reads as "nothing was changed" — after a mutation
+    # had in fact applied. The read must be retried until the deadline.
+    import builtins
+    from bridge_fakes import fake_bridge
+    fake_bridge(root, {"ok": True, "data": {"pong": True}})
+    real_open = builtins.open
+    denied = {"count": 0}
+
+    def flaky_open(file, mode="r", *a, **k):
+        locked = (isinstance(file, str) and (os.sep + "outbox") in file
+                  and file.endswith(".json") and "r" in mode)
+        if locked and denied["count"] < 2:
+            denied["count"] += 1
+            raise PermissionError(13, "The process cannot access the file", file)
+        return real_open(file, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", flaky_open)
+    _cid, reply = reaperd.send_command({"type": "ping", "payload": {}},
+                                       wait=True, timeout_ms=5000,
+                                       bridge_root=root)
+    assert denied["count"] == 2
+    assert json.loads(reply)["ok"] is True
+
+
+# --- verify CLI parsing (options in any position) --------------------------
+
+def test_verify_options_after_track_are_recovered():
+    # Codex gate MAJOR (2026-07-23): argparse.REMAINDER swallowed every
+    # option after the track, so the documented `verify Bass --json -- ...`
+    # silently dropped --json. They must be recovered.
+    args = reaperd.build_parser().parse_args(
+        ["verify", "Bass", "--json", "--seconds", "5", "--",
+         "set_fx_param", "{}"])
+    cmd_type, payload_text, err = reaperd._split_verify_mutation(args)
+    assert err is None
+    assert (cmd_type, payload_text) == ("set_fx_param", "{}")
+    assert args.json is True
+    assert args.seconds == 5.0
+
+
+def test_verify_options_before_track_still_work():
+    args = reaperd.build_parser().parse_args(
+        ["verify", "--json", "Bass", "--", "set_fx_param", "{}"])
+    cmd_type, payload_text, err = reaperd._split_verify_mutation(args)
+    assert err is None
+    assert (cmd_type, payload_text) == ("set_fx_param", "{}")
+    assert args.json is True
+
+
+def test_verify_junk_before_separator_is_an_error():
+    args = reaperd.build_parser().parse_args(
+        ["verify", "Bass", "oops", "--", "set_fx_param", "{}"])
+    _t, _p, err = reaperd._split_verify_mutation(args)
+    assert err is not None and "oops" in err
+
+
+def test_verify_missing_mutation_is_an_error():
+    args = reaperd.build_parser().parse_args(["verify", "Bass", "--"])
+    _t, _p, err = reaperd._split_verify_mutation(args)
+    assert err is not None
+
+
+def test_verify_help_after_track_prints_help_not_error(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        reaperd.main(["verify", "Bass", "--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "--seconds" in out and "--json" in out
+
+
+def test_fresh_reply_still_returned_and_consumed(root):
+    fake_bridge(root, {"ok": True, "type": "ping", "data": {}})
+    cid, reply = reaperd.send_command({"type": "ping", "payload": {}},
+                                      wait=True, timeout_ms=5000, bridge_root=root)
+    assert json.loads(reply)["ok"] is True
+    assert not os.path.exists(os.path.join(root, "outbox", cid + ".json"))
+
+
+# --- fix 1 (CLI side): timeout withdraws the queued command ----------------
+
+def test_timeout_withdraws_inbox_file(root):
+    with pytest.raises(TimeoutError):
+        reaperd.send_command({"id": "will-timeout", "type": "ping", "payload": {}},
+                             wait=True, timeout_ms=200, bridge_root=root)
+    assert not os.path.exists(os.path.join(root, "inbox", "will-timeout.json"))
+
+
+# --- fix 5: send --wait exit code tracks the reply -------------------------
+
+def _send_args(root, tmp_path, wait=True):
+    cmd_file = tmp_path / "cmd.json"
+    cmd_file.write_text(json.dumps({"type": "ping", "payload": {}}))
+    return argparse.Namespace(file=str(cmd_file), wait=wait, timeout=5000,
+                              bridge_root=root)
+
+
+def test_send_wait_exits_1_on_ok_false(root, tmp_path):
+    fake_bridge(root, {"ok": False, "error": {"code": "NO_SUCH_TRACK"}})
+    assert reaperd.cmd_send(_send_args(root, tmp_path)) == 1
+
+
+def test_send_wait_exits_0_on_ok_true(root, tmp_path):
+    fake_bridge(root, {"ok": True, "data": {}})
+    assert reaperd.cmd_send(_send_args(root, tmp_path)) == 0
+
+
+def test_send_rejects_unsafe_command_id_cleanly(root, tmp_path, capsys):
+    args = _send_args(root, tmp_path, wait=False)
+    with open(args.file, "w", encoding="utf-8") as f:
+        json.dump({"id": "../escape", "type": "ping", "payload": {}}, f)
+    assert reaperd.cmd_send(args) == 1
+    assert "unsafe command id" in capsys.readouterr().err
+
+
+# --- fix 4: setparam honest verdicts ---------------------------------------
+
+@pytest.mark.parametrize("target,after,code", [
+    ("80 Hz", "80.0 Hz", 0),        # on target
+    ("80 Hz", "86 Hz", 0),          # within 10%: CLOSE, still ok
+    ("80 Hz", "8000 Hz", 1),        # 100x off: MISSED, no more exit 0
+    ("100", "111", 1),              # just past 10%
+    ("-3 dB", "-3.1 dB", 0),        # signed, abs floor
+    ("Bell", "Bell", 0),            # enum target: text match (old code: TypeError)
+    ("Bell", "Low Shelf", 1),       # enum target mismatch
+    ("80 Hz", None, 1),             # display unreadable: unverified is a failure
+])
+def test_judge_landed(target, after, code):
+    assert reaperd._judge_landed("Param", target, after) == code
+
+
+def _scripted_send_type(script):
+    """send_type stand-in: pops one canned reply per call, asserts the type."""
+    calls = []
+
+    def fake(cmd_type, payload, **kw):
+        calls.append(cmd_type)
+        want_type, reply = script.pop(0)
+        assert cmd_type == want_type, f"call {len(calls)}: {cmd_type} != {want_type}"
+        return reply
+    return fake
+
+
+def test_setparam_verify_scan_failure_exits_1(monkeypatch, root):
+    params = {"ok": True, "data": {"parameters": [
+        {"index": 0, "name": "Frequency", "formatted_value": "100 Hz"}]}}
+    monkeypatch.setattr(reaperd, "send_type", _scripted_send_type([
+        ("get_fx_parameters", params),
+        ("set_fx_param", {"ok": True}),
+        ("get_fx_parameters", {"ok": False, "error": {"code": "TIMEOUT"}}),
+    ]))
+    args = argparse.Namespace(track="master", fx="ReaEQ", param="#0",
+                              value="80 Hz", bridge_root=root)
+    assert reaperd.cmd_setparam(args) == 1
+
+
+# --- fix 3: eq only claims LIVE with evidence -------------------------------
+
+EQ_PARAMS = {"ok": True, "data": {"parameters": [
+    {"index": 0, "name": "Band 1 Used", "formatted_value": "On"},
+    {"index": 1, "name": "Band 1 Frequency", "formatted_value": "100 Hz"},
+    {"index": 2, "name": "Band 1 Gain", "formatted_value": "0.0 dB"},
+]}}
+
+
+def _eq_args(root):
+    return argparse.Namespace(track="Kick", fx="Pro-Q", band=1, freq="80",
+                              gain="-3", q=None, bridge_root=root)
+
+
+def test_eq_failed_set_exits_1_and_never_says_live(monkeypatch, root, capsys):
+    monkeypatch.setattr(reaperd, "send_type", _scripted_send_type([
+        ("get_fx_parameters", EQ_PARAMS),
+        ("set_fx_param", {"ok": True}),                      # enable
+        ("set_fx_param", {"ok": False, "error": {"code": "TIMEOUT"}}),  # freq
+        ("set_fx_param", {"ok": True}),                      # gain
+    ]))
+    assert reaperd.cmd_eq(_eq_args(root)) == 1
+    assert "LIVE" not in capsys.readouterr().out
+
+
+def test_eq_verify_scan_failure_exits_1_and_never_says_live(monkeypatch, root, capsys):
+    monkeypatch.setattr(reaperd, "send_type", _scripted_send_type([
+        ("get_fx_parameters", EQ_PARAMS),
+        ("set_fx_param", {"ok": True}),
+        ("set_fx_param", {"ok": True}),
+        ("set_fx_param", {"ok": True}),
+        ("get_fx_parameters", {"ok": False, "error": {"code": "TIMEOUT"}}),
+    ]))
+    assert reaperd.cmd_eq(_eq_args(root)) == 1
+    assert "LIVE" not in capsys.readouterr().out
+
+
+def test_eq_happy_path_still_reports_live(monkeypatch, root, capsys):
+    landed = {"ok": True, "data": {"parameters": [
+        {"index": 0, "name": "Band 1 Used", "formatted_value": "On"},
+        {"index": 1, "name": "Band 1 Frequency", "formatted_value": "80.0 Hz"},
+        {"index": 2, "name": "Band 1 Gain", "formatted_value": "-3.0 dB"},
+    ]}}
+    monkeypatch.setattr(reaperd, "send_type", _scripted_send_type([
+        ("get_fx_parameters", EQ_PARAMS),
+        ("set_fx_param", {"ok": True}),
+        ("set_fx_param", {"ok": True}),
+        ("set_fx_param", {"ok": True}),
+        ("get_fx_parameters", landed),
+    ]))
+    assert reaperd.cmd_eq(_eq_args(root)) == 0
+    assert "BAND IS LIVE" in capsys.readouterr().out
+
+
+# --- fix 9 (phase 2): paginated FX param scan with the field the bridge reads
+
+def test_scan_fx_parameters_paginates_past_bridge_cap(monkeypatch):
+    page1 = {"ok": True, "data": {
+        "track": {"guid": "{TRACK}"},
+        "fx": {"guid": "{FX}"},
+        "parameters": [{"index": i} for i in range(1000)],
+        "paging": {"has_more": True},
+    }}
+    page2 = {"ok": True, "data": {
+        "track": {"guid": "{TRACK}"},
+        "fx": {"guid": "{FX}"},
+        "parameters": [{"index": 1000 + i} for i in range(200)],
+        "paging": {"has_more": False},
+    }}
+    seen = []
+
+    def fake(cmd_type, payload, **kw):
+        assert cmd_type == "get_fx_parameters"
+        seen.append(payload)
+        return page1 if len(seen) == 1 else page2
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    params, err = reaperd.scan_fx_parameters({"target_track_name": "master"}, None)
+    assert err is None
+    assert len(params) == 1200                    # Kontakt-scale plugin fully scanned
+    assert seen[0]["limit"] == 1000               # the field the bridge reads...
+    assert "max_params" not in seen[0]            # ...not the one it ignores
+    assert seen[0]["offset"] == 0 and seen[1]["offset"] == 1000
+
+
+def test_scan_fx_parameter_data_preserves_first_page_identity(monkeypatch):
+    reply = {"ok": True, "data": {
+        "track": {"name": "Bass", "guid": "{TRACK-BASS}"},
+        "fx": {"name": "VST3: EQ", "guid": "{FX-EQ}", "scope": "track"},
+        "parameters": [{"index": 0, "name": "Gain"}],
+        "paging": {"has_more": False},
+    }}
+    monkeypatch.setattr(reaperd, "send_type", lambda *a, **k: reply)
+    data, err = reaperd.scan_fx_parameter_data(
+        {"target_track_name": "Bass", "fx_name_contains": "EQ"}, None)
+    assert err is None
+    assert data["track"]["guid"] == "{TRACK-BASS}"
+    assert data["fx"]["guid"] == "{FX-EQ}"
+    assert data["parameters"] == [{"index": 0, "name": "Gain"}]
+
+
+def test_scan_fx_parameters_error_passthrough(monkeypatch):
+    monkeypatch.setattr(reaperd, "send_type",
+                        lambda *a, **k: {"ok": False, "error": {"code": "NO_FX"}})
+    params, err = reaperd.scan_fx_parameters({}, None)
+    assert params is None
+    assert err == {"code": "NO_FX"}
+
+
+# --- fixes 10-11 (phase 3): platform correctness ----------------------------
+
+class _Ret:
+    def __init__(self, rc):
+        self.returncode = rc
+        self.stdout = ""
+
+
+def test_reaper_running_linux_miss_is_unknown_not_dead(monkeypatch):
+    monkeypatch.setattr(reaperd.platform, "system", lambda: "Linux")
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"] = argv
+        return _Ret(1)
+    monkeypatch.setattr(reaperd.subprocess, "run", fake_run)
+    assert reaperd.reaper_running() is None       # heartbeat decides, not pgrep
+    assert seen["argv"][-1] == "REAPER|reaper"    # lowercase binary matched too
+
+
+def test_reaper_running_linux_hit_is_true(monkeypatch):
+    monkeypatch.setattr(reaperd.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(reaperd.subprocess, "run", lambda *a, **k: _Ret(0))
+    assert reaperd.reaper_running() is True
+
+
+def test_reaper_running_macos_miss_is_still_false(monkeypatch):
+    monkeypatch.setattr(reaperd.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(reaperd.subprocess, "run", lambda *a, **k: _Ret(1))
+    assert reaperd.reaper_running() is False
+
+
+def test_reaper_running_macos_probe_error_defers_to_heartbeat(monkeypatch):
+    monkeypatch.setattr(reaperd.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(reaperd.subprocess, "run", lambda *a, **k: _Ret(3))
+    assert reaperd.reaper_running() is None
+
+
+def test_status_falls_back_to_fresh_heartbeat_when_process_unknown(root, monkeypatch):
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: None)
+    hb = os.path.join(root, "bridge", "heartbeat.json")
+    with open(hb, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"project_name": "x", "alive_at": "t", "busy": "none"}))
+    assert reaperd.status_ok(root, quiet=True) is True
+
+
+def test_status_trusts_fresh_heartbeat_over_false_negative_process_probe(
+    root, monkeypatch
+):
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: False)
+    hb = os.path.join(root, "bridge", "heartbeat.json")
+    with open(hb, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"project_name": "x", "alive_at": "t", "busy": "none"}))
+    assert reaperd.status_ok(root, quiet=True) is True
+
+
+def test_status_dead_when_process_definitely_gone(root, monkeypatch):
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: False)
+    assert reaperd.status_ok(root, quiet=True) is False
+
+
+# --- phase 5 minors ----------------------------------------------------------
+
+def test_groove_gates_on_dead_bridge_instantly(root, monkeypatch, tmp_path):
+    # A dead REAPER used to cost groove the full 20s insert timeout.
+    monkeypatch.setattr(reaperd, "status_ok", lambda *a, **k: False)
+    monkeypatch.setattr(reaperd.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError(
+                            "groove must not render when the bridge is dead")))
+    dsl = tmp_path / "beat.dsl"
+    dsl.write_text("@tempo 144\n[v] bars=1 feel=mf\ngrid 16\nkick | x... |\n")
+    args = argparse.Namespace(bridge_root=root, dsl=str(dsl), track=None,
+                              position=None, tempo=None, seed=None, map=None)
+    assert reaperd.cmd_groove(args) == 1
+
+
+def test_status_busy_flag_expires(root, monkeypatch):
+    # A heartbeat frozen at busy=render used to read BUSY forever, even days
+    # after a death mid-render. Past the cap it must read dead.
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: True)
+    hb = os.path.join(root, "bridge", "heartbeat.json")
+    with open(hb, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"project_name": "x", "alive_at": "t", "busy": "render"}))
+    fresh_busy = time.time() - 60
+    os.utime(hb, (fresh_busy, fresh_busy))
+    assert reaperd.status_ok(root, quiet=True) is True     # 1 min: still BUSY
+    ancient = time.time() - 20 * 60
+    os.utime(hb, (ancient, ancient))
+    assert reaperd.status_ok(root, quiet=True) is False    # 20 min: dead
+
+
+def test_strip_block_aborts_on_begin_without_end():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "rd_install", os.path.join(REPO, "setup", "install.py"))
+    install = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(install)
+    text = "user code\n" + install.BEGIN + "\nmanaged line\nmore user code\n"
+    with pytest.raises(RuntimeError):
+        install.strip_block(text)
+    intact = f"a\n{install.BEGIN}\nx\n{install.END}\nb\n"
+    assert install.strip_block(intact) == "a\nb\n"
+
+
+def test_startup_block_watchdog_understands_json_locks():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "rd_install_watchdog", os.path.join(REPO, "setup", "install.py"))
+    install = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(install)
+
+    block = install.block_text(os.path.join(REPO, "bridge"))
+
+    assert 'content:match(\'"started"%s*:%s*(%d+)\')' in block
+    assert 'content:match(\'"busy"%s*:%s*"([^\"]+)"\')' in block
+    assert "RENDER_LOCK_MAX_AGE = 6 * 3600" in block
+    assert "reaper.defer(watchdog)" in block
+    assert "os.remove(lockfile)" not in block
+
+
+# --- verify/measure --json honesty on non-finite floats ---------------------
+
+def _verify_args(root, payload):
+    return reaperd.build_parser().parse_args(
+        ["--bridge-root", root, "verify", "Bass", "--json", "--",
+         "set_track_volume", payload])
+
+
+def test_verify_json_survives_nan_result_and_keeps_exit_code(
+    root, monkeypatch, capsys
+):
+    # A NaN embedded in the result (e.g. copied verbatim from a bridge
+    # reply) used to crash the --json dump into a traceback and exit 1
+    # ("not applied") after the mutation may have run.
+    import verifyloop
+    res = {"status": "UNVERIFIED", "exit_code": 2,
+           "post": {"metrics": {"lufs_i": float("nan")}}}
+    monkeypatch.setattr(verifyloop, "verify", lambda *a, **k: res)
+    rc = reaperd.cmd_verify(_verify_args(root, '{"volume_db":-3.0}'))
+    out = capsys.readouterr().out
+    assert "NaN" not in out
+    assert json.loads(out)["post"]["metrics"]["lufs_i"] is None
+    assert rc == 2
+
+
+def test_verify_missing_exit_code_fails_toward_unverified(
+    root, monkeypatch, capsys
+):
+    # No exit_code in the result: by then the mutation may have run, so the
+    # fallback must be 2 (unverified), never 1 (not applied).
+    import verifyloop
+    monkeypatch.setattr(verifyloop, "verify",
+                        lambda *a, **k: {"status": "VERIFIED"})
+    assert reaperd.cmd_verify(_verify_args(root, '{"volume_db":-3.0}')) == 2
+
+
+def test_verify_rejects_nonfinite_payload_before_any_mutation(
+    root, monkeypatch, capsys
+):
+    import verifyloop
+
+    def boom(*a, **k):
+        raise AssertionError("verify must not run on a non-finite payload")
+
+    monkeypatch.setattr(verifyloop, "verify", boom)
+    rc = reaperd.cmd_verify(_verify_args(root, '{"volume_db":NaN}'))
+    assert rc == 1
+    assert "non-finite" in capsys.readouterr().err
+
+
+def test_measure_json_survives_nonfinite_metric(root, monkeypatch, capsys):
+    import verifyloop
+    monkeypatch.setattr(
+        verifyloop, "measure",
+        lambda *a, **k: {"ok": True, "metrics": {"rms_db": float("inf")}})
+    args = argparse.Namespace(track="Bass", seconds=None, start=None,
+                              keep_wav=False, json=True, bridge_root=root)
+    rc = reaperd.cmd_measure(args)
+    out = capsys.readouterr().out
+    assert "Infinity" not in out
+    assert json.loads(out)["metrics"]["rms_db"] is None
+    assert rc == 0
+
+
+def test_bridge_sender_default_timeout_is_the_shared_constant(
+    root, monkeypatch
+):
+    # CLI and MCP senders must not drift (10 s vs 15 s gave two verdicts for
+    # one project state on a slow REAPER).
+    import verifyloop
+    seen = {}
+
+    def fake(cmd_type, payload, **kw):
+        seen.update(kw)
+        return {"ok": True}
+
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    reaperd._bridge_sender(root)("get_context", {})
+    assert seen["timeout_ms"] == verifyloop.DEFAULT_SENDER_TIMEOUT_MS == 10000
+
+
+# --- profile: --max-seconds 0 must be forwarded, not dropped ---------------
+
+def test_profile_forwards_zero_max_seconds_for_rejection(monkeypatch, tmp_path):
+    """--max-seconds 0 must reach drumgen.profile (which rejects it with a
+    clear error), not vanish behind a truthiness check and silently profile
+    the whole item."""
+    import types
+    proj = tmp_path / "song.rpp"
+    proj.write_text("<REAPER_PROJECT 0.1\n>\n")
+    (tmp_path / "skills" / "drum-apparatus").mkdir(parents=True)
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return types.SimpleNamespace(
+            returncode=1, stdout="",
+            stderr="error: max_seconds must be positive (got 0)")
+    monkeypatch.setattr(reaperd.subprocess, "run", fake_run)
+    args = types.SimpleNamespace(project=str(proj), track="gtr", bars=None,
+                                 start_bar=0, max_seconds=0.0, json=False,
+                                 bridge_root=str(tmp_path))
+    rc = reaperd.cmd_profile(args)
+    assert rc == 1
+    # wire protocol: [bars sentinel, start_bar, max_seconds] all present
+    assert seen["cmd"][-3:] == ["0", "0", "0.0"]
+
+
+# --- render-blocking commands need a render-sized timeout -------------------
+#
+# capture_track_audio and render block REAPER's main thread for the whole
+# render: no defer ticks, no heartbeat, no reply until it finishes. The 10s
+# default made the CLI print TIMEOUT for a command that had succeeded and
+# whose result landed in outbox/ seconds later. A wrong failure report is
+# worse than a slow one.
+
+def test_capture_timeout_scales_with_the_requested_capture_length():
+    assert reaperd.render_timeout_ms(
+        "capture_track_audio", {"seconds": 30}) == 90000
+
+
+def test_capture_timeout_uses_the_bridge_default_when_seconds_is_absent():
+    # The bridge captures 30s when the payload does not say; budget for that
+    # rather than for zero.
+    assert reaperd.render_timeout_ms("capture_track_audio", {}) == 90000
+
+
+def test_capture_timeout_survives_a_junk_seconds_value():
+    assert reaperd.render_timeout_ms(
+        "capture_track_audio", {"seconds": "soon"}) == 90000
+
+
+def test_ordinary_commands_keep_the_short_default():
+    assert reaperd.render_timeout_ms("get_context", {}) == 10000
+
+
+def test_an_explicit_timeout_always_wins():
+    # Including a shorter one: --timeout is the user overriding us on purpose.
+    assert reaperd.render_timeout_ms(
+        "capture_track_audio", {"seconds": 30}, explicit=5000) == 5000
+    assert reaperd.render_timeout_ms("get_context", {}, explicit=1) == 1
+
+
+# --- a fast REAPER restart leaves the bridge dead, briefly ------------------
+#
+# The dead bridge's lock is not stale for 60s, so a re-run of the action loses
+# the ownership race and stops. __startup.lua's watchdog reclaims it on its
+# next 10s tick. status must say "wait", because telling someone to re-run the
+# action here sends them to do something that cannot work.
+
+def _write_lock(root, age_seconds, busy="none"):
+    os.makedirs(os.path.join(root, "logs"), exist_ok=True)
+    with open(os.path.join(root, "logs", "bridge.lock"), "w",
+              encoding="utf-8") as f:
+        json.dump({"busy": busy, "started": time.time() - age_seconds,
+                   "owner": "table: 0xDEAD-1"}, f)
+
+
+def test_lock_eta_reports_worst_case_including_one_watchdog_tick(root):
+    _write_lock(root, age_seconds=20)
+    eta = reaperd.lock_reclaim_eta(root)
+    # 60 - 20 left on the lock, plus a full watchdog tick.
+    assert 49 <= eta <= 51
+
+
+def test_lock_eta_is_none_once_the_lock_is_already_stale(root):
+    _write_lock(root, age_seconds=120)
+    assert reaperd.lock_reclaim_eta(root) is None
+
+
+def test_lock_eta_is_none_for_a_render_busy_lock(root):
+    # A render-busy lock is never reclaimed on age, so waiting is not the
+    # answer and status must not promise a revival that will not come.
+    _write_lock(root, age_seconds=5, busy="render")
+    assert reaperd.lock_reclaim_eta(root) is None
+
+
+def test_lock_eta_is_none_when_there_is_no_lock(root):
+    assert reaperd.lock_reclaim_eta(root) is None
+
+
+def test_status_says_wait_not_rerun_during_the_lock_window(
+    root, monkeypatch, capsys
+):
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: True)
+    hb = os.path.join(root, "bridge", "heartbeat.json")
+    with open(hb, "w", encoding="utf-8") as f:
+        json.dump({"project_name": "x", "alive_at": "t", "busy": "none"}, f)
+    old = time.time() - 30
+    os.utime(hb, (old, old))
+    _write_lock(root, age_seconds=30)
+    assert reaperd.status_ok(root) is False
+    out = capsys.readouterr().out
+    assert "WAIT, do not re-run" in out
+    assert "watchdog reclaims" in out
+
+
+def test_status_still_says_rerun_once_nothing_holds_the_lock(
+    root, monkeypatch, capsys
+):
+    monkeypatch.setattr(reaperd, "reaper_running", lambda: True)
+    hb = os.path.join(root, "bridge", "heartbeat.json")
+    with open(hb, "w", encoding="utf-8") as f:
+        json.dump({"project_name": "x", "alive_at": "t", "busy": "none"}, f)
+    old = time.time() - 300
+    os.utime(hb, (old, old))
+    _write_lock(root, age_seconds=300)
+    assert reaperd.status_ok(root) is False
+    out = capsys.readouterr().out
+    assert "Revive: re-run the bridge action" in out
+    assert "WAIT" not in out
+
+
+def test_reply_wait_starts_fast_then_backs_off(root, monkeypatch):
+    clock = [0.0]
+    delays = []
+    from types import SimpleNamespace
+    def sleep(delay):
+        delays.append(delay)
+        clock[0] += delay
+    monkeypatch.setattr(reaperd, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=sleep))
+    with pytest.raises(TimeoutError):
+        reaperd.send_command({"type": "get_context"}, wait=True,
+                             timeout_ms=1100, bridge_root=root)
+    assert delays[0] == 0.005
+    assert delays[-1] == 0.025
+    assert not list(__import__('pathlib').Path(root, 'inbox').glob('*.json'))
+
+
+# --- save-chain / snapshot-chains (2026-09-08) ------------------------------
+
+@pytest.mark.parametrize("name, slug", [
+    ("bass", "bass"),
+    ("Kick - stem", "kick"),
+    ("Floor-R1 - stem", "floor-r1"),
+    ("gtr-buss", "gtr-buss"),
+    ("Overheads  (OH) ", "overheads-oh"),
+    ("MASTER", "master"),
+    ("---", "track"),
+])
+def test_chain_slug(name, slug):
+    assert reaperd.chain_slug(name) == slug
+
+
+def _recording_send_type(replies):
+    """Scripted send_type that also keeps every payload for assertions."""
+    sent = []
+
+    def fake(cmd_type, payload, **kw):
+        sent.append((cmd_type, dict(payload)))
+        return replies.pop(0)
+    fake.sent = sent
+    return fake
+
+
+def test_save_chain_defaults_name_to_slug_and_forwards_overwrite(monkeypatch, root):
+    fake = _recording_send_type([{"ok": True, "data": {
+        "chain": {"path": "X/FXChains/kick.RfxChain", "fx_in_chain": 1}}}])
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    args = argparse.Namespace(track="Kick - stem", name=None, overwrite=True, bridge_root=root)
+    assert reaperd.cmd_save_chain(args) == 0
+    assert fake.sent == [("save_fx_chain", {
+        "target_track_name": "Kick - stem", "chain_name": "kick", "overwrite": True})]
+
+
+def test_save_chain_refusal_exits_1(monkeypatch, root):
+    monkeypatch.setattr(reaperd, "send_type", _recording_send_type([
+        {"ok": False, "error": {"code": "CHAIN_EXISTS", "details": "x"}}]))
+    args = argparse.Namespace(track="bass", name="bass-mixing", overwrite=False, bridge_root=root)
+    assert reaperd.cmd_save_chain(args) == 1
+
+
+CTX = {"ok": True, "data": {"tracks": [
+    {"index": 1, "name": "gtr-buss", "fx": [{"name": "Pro-Q 4"}, {"name": "Axx"}]},
+    {"index": 2, "name": "gtr-left", "fx": []},
+    {"index": 7, "name": "Kick - stem", "fx": [{"name": "Bass Mint"}]},
+    {"index": 0, "name": "MASTER", "fx": [{"name": "Poseidon"}]},
+]}}
+
+
+def test_snapshot_chains_saves_only_tracks_with_fx_and_addresses_master(monkeypatch, root, capsys):
+    fake = _recording_send_type([dict(CTX)] + [{"ok": True, "data": {}}] * 3)
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    args = argparse.Namespace(prefix="dis-", overwrite=False, dry_run=False, bridge_root=root)
+    assert reaperd.cmd_snapshot_chains(args) == 0
+    saves = [p for t, p in fake.sent if t == "save_fx_chain"]
+    assert [p["target_track_name"] for p in saves] == ["gtr-buss", "Kick - stem", "master"]
+    assert [p["chain_name"] for p in saves] == ["dis-gtr-buss", "dis-kick", "dis-master"]
+    assert all(p["overwrite"] is False for p in saves)
+    assert "saved   'gtr-left'" not in capsys.readouterr().out
+
+
+def test_snapshot_chains_dry_run_sends_no_saves(monkeypatch, root, capsys):
+    fake = _recording_send_type([dict(CTX)])
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    args = argparse.Namespace(prefix="", overwrite=False, dry_run=True, bridge_root=root)
+    assert reaperd.cmd_snapshot_chains(args) == 0
+    assert [t for t, _ in fake.sent] == ["get_context"]
+    assert capsys.readouterr().out.count("would save") == 3
+
+
+def test_snapshot_chains_reports_existing_as_skipped_and_exits_1(monkeypatch, root, capsys):
+    fake = _recording_send_type([dict(CTX),
+        {"ok": True, "data": {}},
+        {"ok": False, "error": {"code": "CHAIN_EXISTS", "details": "kick.RfxChain"}},
+        {"ok": True, "data": {}}])
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    args = argparse.Namespace(prefix="", overwrite=False, dry_run=False, bridge_root=root)
+    assert reaperd.cmd_snapshot_chains(args) == 1
+    out = capsys.readouterr().out
+    assert "skipped 'Kick - stem' -> kick.RfxChain exists" in out
+    assert out.count("saved") == 2
+
+
+# --- discover-map: RS Monarch's live .midnam (2026-09-22) -------------------
+#
+# The same live discover_drum_map dump as the classifier tests in
+# skills/drum-apparatus/tests/test_mapdetect.py, sent in the bridge's reply
+# shape and out of pitch order. A map saved from it must never put a choke key
+# (a mute trigger) on a hit role: that silenced crash_l, china_l and splash_l.
+
+MONARCH_MIDNAM = {
+    24: "Kick", 26: "Snare Center", 27: "Snare Flam", 28: "Snare Rimshot",
+    29: "Snare Rimshot Flam", 30: "Side Stick", 33: "Floor R2",
+    35: "Floor R1", 36: "Floor L", 37: "Rack 2", 38: "Rack 1",
+    40: "Pedal Hat", 41: "Tight Closed Tip", 42: "Tight Closed Shoulder",
+    43: "Normal Closed Tip", 44: "Normal Closed Shoulder", 45: "Small Open",
+    46: "Medium Open", 47: "Large Open", 49: "Left Crash",
+    50: "Left Crash Choke", 51: "Splash", 52: "Mini Stack", 53: "Mini Bell",
+    54: "Right Crash", 55: "Right Crash Choke", 56: "China",
+    57: "China Choke", 58: "Far Left Crash", 59: "Far Left Crash Choke",
+    60: "Stack", 61: "Ride Bell Shoulder", 62: "Ride Bow Tip",
+    63: "Ride Bell Tip", 64: "Splash Choke", 65: "Mini Bell Choke",
+    69: "Pedal Splash",
+}
+
+
+def test_discover_map_saves_a_playable_monarch_map(monkeypatch, root, capsys):
+    monkeypatch.syspath_prepend(os.path.join(REPO, "skills", "drum-apparatus"))
+    notes = {str(p): {"name": MONARCH_MIDNAM[p], "channel": 0}
+             for p in sorted(MONARCH_MIDNAM, reverse=True)}
+    sent = []
+
+    def fake(cmd_type, payload, **kw):
+        sent.append(cmd_type)
+        return {"ok": True, "data": {"track": {"name": "Monarch"},
+                                     "fx": ["Kontakt 7"], "notes": notes,
+                                     "has_note_names": True}}
+    monkeypatch.setattr(reaperd, "send_type", fake)
+    args = argparse.Namespace(track="Monarch", guid=None, channels="0",
+                              max_pitch=127, save="Monarch Discovered",
+                              bridge_root=root)
+    assert reaperd.cmd_discover_map(args) == 0
+    assert sent == ["discover_drum_map"]
+    path = os.path.join(root, "skills", "drum-apparatus", "maps",
+                        "Monarch Discovered.json")
+    with open(path, encoding="utf-8") as f:
+        saved = json.load(f)
+    chokes = {p for p, name in MONARCH_MIDNAM.items() if "Choke" in name}
+    for role, pitch in saved.items():
+        assert (pitch in chokes) == role.endswith("_CHOKE"), role
+    assert saved["CRASH_L"] == 49 and saved["CRASH_R"] == 54
+    assert saved["BIG_CRASH"] == 58 and saved["CHINA_L"] == 56
+    assert saved["SPLASH_L"] == 51 and saved["HH_PEDAL"] == 40
+    assert [saved["TOM_%d" % n] for n in (1, 2, 3, 4)] == [38, 37, 36, 35]
+    assert saved["HH_CLOSED_TIP"] == 41 and saved["HH_OPEN_1"] == 45
+    assert (saved["CRASH_CHOKE"], saved["CHINA_CHOKE"],
+            saved["SPLASH_CHOKE"]) == (55, 57, 64)
+    assert "WARNING: partial map" not in capsys.readouterr().out
