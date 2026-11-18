@@ -1,0 +1,32 @@
+diff --git a/upstream/bridge/reaper_agent_bridge.lua b/upstream/bridge/reaper_agent_bridge.lua
+index e89f6d6..c0bff70 100644
+--- a/upstream/bridge/reaper_agent_bridge.lua
++++ b/upstream/bridge/reaper_agent_bridge.lua
+@@ -5325,6 +5325,27 @@ handlers.reload_bridge = command_reload_bridge
+ -- Composition
+ handlers.batch = command_batch
+ 
++-- reaper-agent hook (patches/0001-extra-handlers.patch): load extra handler modules named in
++-- bridge_config.json under "extra_handler_modules". Each file returns a table with a
++-- register(ctx) function; ctx = { reaper, handlers, json, no_undo_block, config, log, module_path }.
++-- A module that fails to load or register is logged and skipped; the bridge keeps running.
++if type(config.extra_handler_modules) == "table" then
++  for _, module_path in ipairs(config.extra_handler_modules) do
++    local chunk, load_err = loadfile(module_path)
++    local ok, mod = false, load_err
++    if chunk then ok, mod = pcall(chunk) end
++    if ok and type(mod) == "table" and type(mod.register) == "function" then
++      local reg_ok, reg_err = pcall(mod.register, {
++        reaper = reaper, handlers = handlers, json = json,
++        no_undo_block = NO_UNDO_BLOCK, config = config, log = log_line, module_path = module_path,
++      })
++      if not reg_ok then log_line("extra handler module failed to register: " .. tostring(module_path) .. ": " .. tostring(reg_err)) end
++    else
++      log_line("extra handler module failed to load: " .. tostring(module_path) .. ": " .. tostring(mod))
++    end
++  end
++end
++
+ local function write_result(command, ok, data_or_error)
+   local result
+   if ok then
