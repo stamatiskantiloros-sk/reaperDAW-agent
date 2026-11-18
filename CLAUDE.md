@@ -9,7 +9,7 @@ An MCP server that lets an AI agent tidy REAPER projects and write section-based
 - **Stop at every gate.** Write the manual test steps for the user, then wait for an explicit OK before the next phase.
 - Record significant choices as ADRs in `docs/decisions/NNNN-title.md` (context, decision, consequences; half a page).
 - Ask before adding a dependency. The bridge side stays dependency-free (Lua + Python stdlib), as upstream is.
-- One branch per phase (`phase-N-short-name`), small commits with clear messages, PR at the gate. The GitHub repo is **private**.
+- One branch per phase (`phase-N-short-name`), small commits with clear messages, PR at the gate. The GitHub repo is `stamatiskantiloros-sk/reaperDAW-agent` and is **public** (owner's decision, 2026-11-18): never commit personal paths, real project files, audio or credentials.
 
 ## Non-negotiable rules
 

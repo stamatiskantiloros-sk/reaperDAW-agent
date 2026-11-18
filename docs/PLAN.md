@@ -26,7 +26,7 @@ This plan is the working contract for building `reaper-agent`. Claude Code execu
 | LLM backend | Any MCP client: Claude (Code, Desktop, API) or a local model through an MCP-capable client. The intelligence lives in deterministic tools; the model only orchestrates. A `core` tool profile of 30 tools or fewer serves models with tool-count limits. |
 | Plugins | All formats (VST2, VST3, AU, CLAP, JS, REAPER native). Generic discovery first; per-plugin profiles grow over time, starting with ReaEQ and the user's most-used plugins, Toontrack included. |
 | Conventions | Evidence-based default naming and colour scheme in `config/conventions.yaml` (section 7). |
-| Repo | Private GitHub repo `reaper-agent`. |
+| Repo | Public GitHub repo `reaperDAW-agent` (owner's decision, 2026-11-18; originally planned private). |
 
 ## 3. Architecture
 
@@ -94,7 +94,7 @@ Effort is in Claude Code working sessions (S ≈ 1–2, M ≈ 3–5, L ≈ 6+). 
 
 Goal: prove the bridge choice on a real REAPER install before building on it.
 
-- [ ] Create the private repo, add this kit, fork Reaper Daemon into it (keep `upstream` remote).
+- [x] Create the repo (`reaperDAW-agent`, public), add this kit, fork Reaper Daemon into it under `upstream/` (keep `upstream` remote).
 - [ ] Install the bridge on the user's machine; `status` shows it alive.
 - [ ] Read the fork's code; write a short map of its command set, transport, timeouts and gating switches into `docs/decisions/0001-bridge.md`.
 - [ ] Run the **bridge checklist** below on a scratch project, for Reaper Daemon and (quickly) ReaperMCP.
