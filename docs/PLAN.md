@@ -95,11 +95,11 @@ Effort is in Claude Code working sessions (S ≈ 1–2, M ≈ 3–5, L ≈ 6+). 
 Goal: prove the bridge choice on a real REAPER install before building on it.
 
 - [x] Create the repo (`reaperDAW-agent`, public), add this kit, fork Reaper Daemon into it under `upstream/` (keep `upstream` remote).
-- [ ] Install the bridge on the user's machine; `status` shows it alive.
-- [ ] Read the fork's code; write a short map of its command set, transport, timeouts and gating switches into `docs/decisions/0001-bridge.md`.
-- [ ] Run the **bridge checklist** below on a scratch project, for Reaper Daemon and (quickly) ReaperMCP.
-- [ ] Measure: snapshot time for a 50-track and a 150-track project; round-trip latency per command.
-- [ ] Record the decision (fork Reaper Daemon, or switch) with the checklist results in ADR 0001.
+- [x] Install the bridge on the user's machine; `status` shows it alive.
+- [x] Read the fork's code; write a short map (map in `docs/decisions/0001-evidence/`) of its command set, transport, timeouts and gating switches into `docs/decisions/0001-bridge.md`.
+- [x] Run the **bridge checklist** below on a scratch project, for Reaper Daemon live; ReaperMCP from code only (not run live).
+- [x] Measure: snapshot time for a 50-track and a 150-track project; round-trip latency per command.
+- [x] Record the decision (fork Reaper Daemon, or switch) with the checklist results in ADR 0001 (proposed, awaiting Gate 0).
 
 **Bridge checklist** (each must pass, or have a clear way to add it):
 
