@@ -8,11 +8,15 @@ directly, for anything that mutates the project.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from agent.bridge_client.protocol import Bridge
+from agent.core import diff as diff_mod
+from agent.core import simulate
+from agent.core.hashing import snapshot_hash
 from agent.core.models import Change
 from agent.core.ops import Op
-from agent.core.plan import ApplyResult, Plan
+from agent.core.plan import ApplyResult, Plan, PlanError, StalePlanError
 
 
 @dataclass
@@ -28,25 +32,62 @@ class PlanStore:
 
     last_applied: str | None = None  # plan id of the most recent successful real apply
 
+    def __init__(self) -> None:
+        self._plans: dict[str, Plan] = {}
+        self.last_applied = None
+
     def add(self, plan: Plan) -> None:
-        raise NotImplementedError
+        self._plans[plan.id] = plan
 
     def get(self, plan_id: str) -> Plan:
         """Return the plan or raise PlanError('unknown plan ...')."""
-        raise NotImplementedError
+        try:
+            return self._plans[plan_id]
+        except KeyError:
+            raise PlanError(f"unknown plan {plan_id!r}") from None
 
     def discard(self, plan_id: str) -> bool:
-        raise NotImplementedError
+        return self._plans.pop(plan_id, None) is not None
 
     def list(self) -> list[Plan]:
-        raise NotImplementedError
+        return list(self._plans.values())
 
 
 def build_plan(bridge: Bridge, store: PlanStore, summary: str, ops: list[Op]) -> Plan:
     """Snapshot the project, hash it, simulate the ops on a copy to fill `Plan.expected`, store
     and return the plan. Raises PlanError if the ops are invalid or cannot apply to this
     snapshot (unknown GUID, etc.). Never changes the project."""
-    raise NotImplementedError
+    snapshot = bridge.snapshot()
+    plan = Plan.new(summary, ops, snapshot_hash(snapshot))
+    simulated, _ = simulate.apply_ops(snapshot, plan.ops)
+    plan.expected = diff_mod.diff(snapshot, simulated)
+    store.add(plan)
+    return plan
+
+
+def _translate(value: Any, mapping: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        return mapping.get(value, value)
+    if isinstance(value, list):
+        return [_translate(v, mapping) for v in value]
+    if isinstance(value, dict):
+        return {k: _translate(v, mapping) for k, v in value.items()}
+    return value
+
+
+def _compare(expected: list[Change], actual: list[Change]) -> list[Change]:
+    """Differences between two change lists. A mismatch has before = the value the plan expected
+    the field to end with and after = the value it actually ended with."""
+    exp = {(c.kind, c.guid, c.field): c for c in expected}
+    act = {(c.kind, c.guid, c.field): c for c in actual}
+    out: list[Change] = []
+    for key in exp.keys() | act.keys():
+        e, a = exp.get(key), act.get(key)
+        want = e.after if e else a.before  # type: ignore[union-attr]
+        got = a.after if a else e.before  # type: ignore[union-attr]
+        if want != got:
+            out.append(Change(key[0], key[1], key[2], want, got))
+    return diff_mod.sort_changes(out)
 
 
 def apply_stored_plan(
@@ -56,10 +97,38 @@ def apply_stored_plan(
     call bridge.apply_plan. After a real, successful apply take a fresh snapshot and diff it
     against plan.expected, returning any differences as `mismatches`. Marks the plan applied
     (store.last_applied) only on a real success."""
-    raise NotImplementedError
+    plan = store.get(plan_id)
+    before = bridge.snapshot()
+    if snapshot_hash(before) != plan.base_hash:
+        raise StalePlanError(f"plan {plan_id} is stale: the project changed since it was planned")
+    result = bridge.apply_plan(plan, dry_run=dry_run)
+    if dry_run or not result.ok:
+        return ApplyOutcome(result)
+    # Simulated GUIDs of newly created objects -> the real ones the bridge reported.
+    try:
+        _, sim_refs = simulate.apply_ops(before, plan.ops)
+    except PlanError:
+        sim_refs = {}
+    mapping = {sim_refs[a]: g for a, g in result.refs.items() if a in sim_refs}
+    expected = [
+        Change(
+            c.kind,
+            _translate(c.guid, mapping),
+            c.field,
+            _translate(c.before, mapping),
+            _translate(c.after, mapping),
+        )
+        for c in plan.expected
+    ]
+    actual = diff_mod.diff(before, bridge.snapshot())
+    store.last_applied = plan.id
+    return ApplyOutcome(result, _compare(expected, actual))
 
 
 def undo_last(bridge: Bridge, store: PlanStore) -> bool:
     """Undo one REAPER undo step if store.last_applied is set, then clear it. Returns False if
     there was nothing of ours to undo."""
-    raise NotImplementedError
+    if store.last_applied is None:
+        return False
+    store.last_applied = None
+    return bridge.undo()
