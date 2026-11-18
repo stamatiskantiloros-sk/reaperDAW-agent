@@ -187,6 +187,19 @@ return function(ctx, U)
     return points
   end
 
+  -- REAPER upper-cases project ext-state keys when enumerating them (EnumProjExtState), so map
+  -- them back to the canonical form: lower case, except the GUID in orig_region:<guid>.
+  local function canonical_project_ext()
+    local out = {}
+    for key, value in pairs(U.project_ext_for_snapshot()) do
+      local name = key:sub(#U.EXT_PREFIX + 1):lower()
+      local guid = name:match("^orig_region:(%b{})$")
+      if guid then name = "orig_region:" .. guid:upper() end
+      out[U.EXT_PREFIX .. name] = value
+    end
+    return out
+  end
+
   local function read_project()
     local _, path = r.EnumProjects(-1)
     return {
@@ -195,7 +208,7 @@ return function(ctx, U)
       sample_rate = U.int(r.GetSetProjectInfo(0, "PROJECT_SRATE", 0, false)),
       reaper_version = r.GetAppVersion(),
       length = U.round(r.GetProjectLength(0)),
-      agent_ext = U.project_ext_for_snapshot(),
+      agent_ext = canonical_project_ext(),
     }
   end
 
