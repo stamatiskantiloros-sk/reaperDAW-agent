@@ -103,6 +103,13 @@ def _loosen(changes: list[Change]) -> list[Change]:
     return out
 
 
+def _lane_names_ok(want: Any, got: Any) -> bool:
+    """REAPER pads and auto-names lanes ('', or '1'..'4' from four lanes up), so only the names
+    the plan actually set must match, position by position."""
+    want, got = want or [], got or []
+    return all(name == "" or (i < len(got) and got[i] == name) for i, name in enumerate(want))
+
+
 def _compare(expected: list[Change], actual: list[Change]) -> list[Change]:
     """Differences between two change lists. A mismatch has before = the value the plan expected
     the field to end with and after = the value it actually ended with."""
@@ -114,6 +121,8 @@ def _compare(expected: list[Change], actual: list[Change]) -> list[Change]:
         e, a = exp.get(key), act.get(key)
         want = e.after if e else a.before  # type: ignore[union-attr]
         got = a.after if a else e.before  # type: ignore[union-attr]
+        if key[2] == "lane_names" and _lane_names_ok(want, got):
+            continue
         if want != got:
             out.append(Change(key[0], key[1], key[2], want, got))
     return diff_mod.sort_changes(out)
@@ -159,5 +168,6 @@ def undo_last(bridge: Bridge, store: PlanStore) -> bool:
     there was nothing of ours to undo."""
     if store.last_applied is None:
         return False
+    plan = store.get(store.last_applied)
     store.last_applied = None
-    return bridge.undo()
+    return bridge.undo(expect_label=plan.summary)

@@ -17,6 +17,14 @@ Every mutating feature (housekeeping, automation) must be safe by construction: 
 ## Measured (live, REAPER 7.86, 150-track fixture)
 `agent.snapshot` 52 ms in one round trip (versus 9.2 s from Daemon's per-track commands); `agent.apply_plan` of a 2-op plan 20 ms; one `agent.undo` restores an identical snapshot hash.
 
+## Findings from the live Lua work (REAPER 7.86)
+- REAPER adds a default point at t=0 when it creates an FX envelope (point count 1 after `ensure_fx_envelope`). Verification therefore ignores envelope point counts; point content is verified by reading the envelope back in Phase 4.
+- Switching a track to fixed lanes yields two empty lane names, and REAPER auto-names lanes "1".."4" from four lanes up; verification only checks the lane names a plan actually set. `set_item_lane` / `set_lane_name` grow the lane count when needed, and `set_lane_name` errors outside fixed-lane mode.
+- Project ext state is not part of REAPER's undo, so `orig_region:*` outlives an undo (harmless: it is bookkeeping and excluded from the hash). Enumerated project ext keys come back lower-cased; the snapshot normalises this.
+- A plan that only writes project-scope ext state creates no undo point. `undo` therefore takes the plan summary as `expect_label` and refuses when the newest undo step has a different name, so we never undo the user's earlier edit.
+- Upstream bug to report: Daemon's `get_fx_param_automation` reads `B_ACTIVE`/`B_VISIBLE`, which are not documented envelope attributes, so it always reports false. Our snapshot uses `ACTIVE`/`VISIBLE`.
+- Shape numbers 0 to 5 round-trip, but no documentation names them; the mapping rests on the REAPER envelope-point conventions.
+
 ## Known limits
 - A small race remains between the stale check and the apply (another edit can land in between); Lua aborts if a target GUID no longer resolves.
 - Rollback relies on REAPER's undo stack; the guard prefers doing nothing over undoing the wrong step.

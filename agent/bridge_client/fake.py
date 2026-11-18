@@ -22,7 +22,7 @@ class FakeBridge:
     def __init__(self, snapshot: Snapshot) -> None:
         self._snapshot = copy.deepcopy(snapshot)
         self._hidden = HiddenState()
-        self._undo: list[tuple[Snapshot, HiddenState]] = []
+        self._undo: list[tuple[Snapshot, HiddenState, str]] = []
         self._guids = GuidCounter(head="BB1D0000")
 
     # FX parameter values and envelope points are not part of the Snapshot; see HiddenState.
@@ -71,7 +71,7 @@ class FakeBridge:
                 OpResult(i, o.type, True, data={"dry_run": True}) for i, o in enumerate(plan.ops)
             ]
             return ApplyResult(True, plan.id, results, dict(sim.refs), dry_run=True)
-        self._undo.append(saved)
+        self._undo.append((*saved, plan.summary))
         self._guids = counter
         self._snapshot = sim.snapshot
         results = [
@@ -79,10 +79,12 @@ class FakeBridge:
         ]
         return ApplyResult(True, plan.id, results, dict(sim.refs))
 
-    def undo(self) -> bool:
+    def undo(self, expect_label: str | None = None) -> bool:
         if not self._undo:
             return False
-        self._snapshot, saved = self._undo.pop()
+        if expect_label is not None and self._undo[-1][2] != expect_label:
+            return False
+        self._snapshot, saved, _ = self._undo.pop()
         self._hidden.assign(saved)
         return True
 

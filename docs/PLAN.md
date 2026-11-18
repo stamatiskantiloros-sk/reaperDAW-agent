@@ -124,16 +124,16 @@ Gate 0: user sees the checklist results and the ADR, and agrees on the bridge.
 
 Goal: the safety machinery every later feature uses.
 
-- [ ] `ProjectSnapshot` model (pydantic or dataclasses): project info, tempo map, tracks (GUID, name, colour, folder depth, parent GUID, sends, FX list, envelope list, automation mode, lane mode), items (GUID, position, length, lane), takes (GUID, name, source file, offline flag), regions/markers. Paged reads for large projects.
-- [ ] One Lua handler `agent.snapshot` returns the whole model in one round trip (fall back to paging past a size limit).
-- [ ] `Plan` model: id, created, base snapshot hash, ordered ops, summary text, expected post-state for the touched fields.
-- [ ] Op vocabulary (v1): `set_track_name`, `set_track_color`, `set_folder_depth`, `move_track`, `insert_track`, `set_take_name`, `set_item_lane`, `set_track_lane_mode`, `set_lane_name`, `add_region`, `set_region`, `set_ext_state`, `set_fx_param`, `ensure_fx_envelope`, `clear_envelope_range`, `insert_envelope_points`, `set_track_automation_mode`.
-- [ ] Lua handler `agent.apply_plan`: resolves GUIDs, runs ops in order inside one undo block named after the plan summary, returns per-op results; on any error, aborts and reports which op failed (and relies on undo to revert).
-- [ ] Original values are saved before changing them (track ext state `P_EXT:reaper_agent:orig_name` etc.) so housekeeping is reversible even after saving.
-- [ ] Diff engine: snapshot vs snapshot → readable change list.
-- [ ] Fake bridge (in-memory project) implementing the same command interface, for unit tests.
-- [ ] MCP tools: `get_project_overview`, `get_snapshot(section)`, `apply_plan(plan_id)`, `discard_plan(plan_id)`, `undo_last_plan`.
-- [ ] Tool profiles: `core` and `full`, selected by env var.
+- [x] `ProjectSnapshot` model (pydantic or dataclasses): project info, tempo map, tracks (GUID, name, colour, folder depth, parent GUID, sends, FX list, envelope list, automation mode, lane mode), items (GUID, position, length, lane), takes (GUID, name, source file, offline flag), regions/markers. Paged reads for large projects (the tool pages its output; the Lua snapshot is one call, 52 ms for 150 tracks, so no Lua paging was needed).
+- [x] One Lua handler `agent.snapshot` returns the whole model in one round trip (fall back to paging past a size limit).
+- [x] `Plan` model: id, created, base snapshot hash, ordered ops, summary text, expected post-state for the touched fields.
+- [x] Op vocabulary (v1): `set_track_name`, `set_track_color`, `set_folder_depth`, `move_track`, `insert_track`, `set_take_name`, `set_item_lane`, `set_track_lane_mode`, `set_lane_name`, `add_region`, `set_region`, `set_ext_state`, `set_fx_param`, `ensure_fx_envelope`, `clear_envelope_range`, `insert_envelope_points`, `set_track_automation_mode`.
+- [x] Lua handler `agent.apply_plan`: resolves GUIDs, runs ops in order inside one undo block named after the plan summary, returns per-op results; on any error, aborts and reports which op failed (and relies on undo to revert).
+- [x] Original values are saved before changing them (track ext state `P_EXT:reaper_agent:orig_name` etc.) so housekeeping is reversible even after saving.
+- [x] Diff engine: snapshot vs snapshot → readable change list.
+- [x] Fake bridge (in-memory project) implementing the same command interface, for unit tests.
+- [x] MCP tools: `get_project_overview`, `get_snapshot(section)`, `apply_plan(plan_id)`, `discard_plan(plan_id)`, `undo_last_plan`.
+- [x] Tool profiles: `core` and `full`, selected by env var.
 
 Tests: plan building and diffing on fixtures (unit); **apply → undo → snapshot identical** on real REAPER (integration). This round-trip test is the most important test in the repo.
 

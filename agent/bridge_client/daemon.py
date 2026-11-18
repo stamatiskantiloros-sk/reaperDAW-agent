@@ -66,5 +66,6 @@ class DaemonBridge:
         body.pop("expected", None)
         return ApplyResult.from_dict(self._send("agent.apply_plan", {"plan": body}))
 
-    def undo(self) -> bool:
-        return bool(self._send("agent.undo").get("undone"))
+    def undo(self, expect_label: str | None = None) -> bool:
+        payload = {"expect_label": expect_label} if expect_label is not None else {}
+        return bool(self._send("agent.undo", payload).get("undone"))

@@ -55,9 +55,13 @@ function M.register(ctx)
 
   -- Undo exactly one REAPER undo step (ours or the user's). Used by undo_last_plan.
   ctx.no_undo_block["agent.undo"] = true
-  ctx.handlers["agent.undo"] = function()
+  ctx.handlers["agent.undo"] = function(command)
     local label = ctx.reaper.Undo_CanUndo2(0)
-    if label == nil or label == "" then return { undone = false } end
+    if label == nil or label == "" then return { undone = false, reason = "nothing to undo" } end
+    local expect = (command.payload or {}).expect_label
+    if expect ~= nil and label ~= expect then
+      return { undone = false, reason = "newest undo step is '" .. label .. "', not '" .. expect .. "'" }
+    end
     ctx.reaper.Undo_DoUndo2(0)
     return { undone = true, label = label }
   end

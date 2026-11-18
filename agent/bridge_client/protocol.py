@@ -36,6 +36,10 @@ class Bridge(Protocol):
         """
         ...
 
-    def undo(self) -> bool:
-        """Undo exactly one REAPER undo step. Returns False if there was nothing to undo."""
+    def undo(self, expect_label: str | None = None) -> bool:
+        """Undo exactly one REAPER undo step. Returns False if there was nothing to undo.
+
+        If expect_label is given, undo only when the newest undo step has that name (the plan
+        summary), so a plan that created no undo point never causes the user's earlier edit to
+        be undone."""
         ...

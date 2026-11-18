@@ -223,3 +223,37 @@ def test_expected_matches_actual_diff_for_a_mixed_plan():
     assert outcome.mismatches == []
     fields = {(c.kind, c.field) for c in diff(pre, bridge.snapshot())}
     assert ("track", "added") in fields and ("track", "envelopes") in fields
+
+
+def test_undo_refuses_when_newest_step_is_not_ours():
+    from agent.bridge_client.fake import FakeBridge
+    from agent.core.hashing import snapshot_hash
+    from agent.core.ops import SetTrackName
+    from agent.core.plan import Plan
+    from tests.unit.factories import guid, make_snapshot
+
+    bridge = FakeBridge(make_snapshot())
+    base = bridge.snapshot()
+    plan = Plan.new(
+        "Rename drums", [SetTrackName(track=guid(1), name="Drumz")], snapshot_hash(base)
+    )
+    assert bridge.apply_plan(plan).ok
+    assert bridge.undo(expect_label="Some other step") is False  # nothing reverted
+    assert bridge.snapshot().track(guid(1)).name == "Drumz"
+    assert bridge.undo(expect_label="Rename drums") is True
+    assert snapshot_hash(bridge.snapshot()) == snapshot_hash(base)
+
+
+def test_verification_tolerates_reaper_lane_padding_and_envelope_point_counts():
+    from agent.core.models import Change
+    from agent.core.store import _compare
+
+    padded = [Change("track", "{T}", "lane_names", [], ["", ""])]
+    named = [Change("track", "{T}", "lane_names", [], ["", "Take 2"])]
+    assert _compare(padded, [Change("track", "{T}", "lane_names", [], ["", ""])]) == []
+    assert _compare(named, [Change("track", "{T}", "lane_names", [], ["", "Take 2", ""])]) == []
+    assert _compare(named, [Change("track", "{T}", "lane_names", [], ["", "Other"])]) != []
+
+    env = lambda n: [{"kind": "fx", "param": 1, "point_count": n, "active": True}]
+    assert _compare([Change("track", "{T}", "envelopes", [], env(0))],
+                    [Change("track", "{T}", "envelopes", [], env(1))]) == []  # fmt: skip
