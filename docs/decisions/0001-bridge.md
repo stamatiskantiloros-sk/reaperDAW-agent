@@ -98,3 +98,12 @@ Fork Reaper Daemon, keep it under `upstream/` with the `upstream` remote, and le
 - Lanes and folder handlers need REAPER 7 API verification against current docs before coding.
 - Borrowing from ReaperMCP (Apache 2.0) needs attribution in a `NOTICE` file. Both bridges can be loaded in one REAPER at once, which is handy for side-by-side checks.
 - Neither bridge has fixed-lane support; that is new work on our side either way.
+
+## Addendum (2026-11-18, Phase 1): the one upstream edit
+
+Reaper Daemon keeps its handler table as a local variable and offers no way to add handlers from outside; `reload_bridge` and the startup watchdog reload only the bridge file. To register `agent.snapshot` / `agent.apply_plan` without forking the whole transport, **`upstream/bridge/reaper_agent_bridge.lua` carries a 21-line hook** (`patches/0001-extra-handlers.patch`, inserted after `handlers.batch = command_batch`).
+
+- Behaviour: for each path in `bridge_config.json` → `extra_handler_modules` (a per-machine, gitignored file), the bridge `loadfile`s it, expects a table with `register(ctx)`, and calls it with `ctx = { reaper, handlers, json, no_undo_block, config, log, module_path }`. A module that fails to load or register is logged and skipped.
+- Our module is `lua/agent/handlers.lua`; `scripts/install_agent.py` adds or removes the path and sends `reload_bridge`.
+- Merging upstream: the hunk is self-contained. If a merge conflicts, re-apply with `git apply patches/0001-extra-handlers.patch`. The patch could be offered upstream.
+- No other upstream file is modified.
