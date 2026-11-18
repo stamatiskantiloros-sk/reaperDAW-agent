@@ -45,13 +45,16 @@ BASE_NAMES = [
 ]
 
 # Native REAPER colours: 0x1000000 flag plus 0xBBGGRR.
-PALETTE = [0x1000000 | (r | (g << 8) | (b << 16)) for (r, g, b) in [
-    (0xD5, 0x5E, 0x00),
-    (0x00, 0x9E, 0x73),
-    (0x56, 0xB4, 0xE9),
-    (0xF0, 0xE4, 0x42),
-    (0xCC, 0x79, 0xA7),
-]]
+PALETTE = [
+    0x1000000 | (r | (g << 8) | (b << 16))
+    for (r, g, b) in [
+        (0xD5, 0x5E, 0x00),
+        (0x00, 0x9E, 0x73),
+        (0x56, 0xB4, 0xE9),
+        (0xF0, 0xE4, 0x42),
+        (0xCC, 0x79, 0xA7),
+    ]
+]
 
 
 class Ids:
@@ -86,15 +89,17 @@ def make_tracks(rng: random.Random, count: int) -> list:
             name = f"Gtr DI_{(i % 20) + 1:02d}"
         else:
             name = rng.choice(BASE_NAMES)
-        tracks.append({
-            "name": name,
-            "colour": rng.choice(PALETTE) if rng.random() < 0.4 else None,
-            "folder": None,
-            "master": True,
-            "aux_from": [],
-            "takes": 1,
-            "length": rng.choice([2, 4, 8]),
-        })
+        tracks.append(
+            {
+                "name": name,
+                "colour": rng.choice(PALETTE) if rng.random() < 0.4 else None,
+                "folder": None,
+                "master": True,
+                "aux_from": [],
+                "takes": 1,
+                "length": rng.choice([2, 4, 8]),
+            }
+        )
 
     # Folder groups: a parent, then 3 to 5 children; last child closes it.
     pos = 2
@@ -181,37 +186,41 @@ def small_routed_project() -> str:
         ("Bass DI", None, True, []),
         ("Gtr DI_01", None, True, []),
         ("Vox Lead", None, True, []),
-        ("Keys L", None, False, []),       # no master send
+        ("Keys L", None, False, []),  # no master send
         ("Verb Bus", None, True, [6, 7]),  # receives from Gtr and Vox
         ("Track 12", None, True, []),
         ("Audio 07", None, True, []),
     ]
     tracks = []
     for i, (name, folder, master, aux) in enumerate(names):
-        tracks.append({
-            "name": name,
-            "colour": PALETTE[i % len(PALETTE)] if i % 3 == 0 else None,
-            "folder": folder,
-            "master": master,
-            "aux_from": aux,
-            "takes": 1,
-            "length": 8,
-        })
+        tracks.append(
+            {
+                "name": name,
+                "colour": PALETTE[i % len(PALETTE)] if i % 3 == 0 else None,
+                "folder": folder,
+                "master": master,
+                "aux_from": aux,
+                "takes": 1,
+                "length": 8,
+            }
+        )
 
     lines = header_lines()
-    lines.extend([
-        "  <TEMPOENVEX " + ids.guid("tempo"),
-        "    ACT 0 -1",
-        "    VIS 1 0 1",
-        "    ARM 0",
-        "    PT 0 120 1",
-        "    PT 16 140 1",
-        "  >",
-        'MARKER 1 0 "chug" 1 8 0 1 R ' + ids.guid("region") + " 0",
-        'MARKER 2 8 "open" 1 16 0 1 R ' + ids.guid("region") + " 0",
-        'MARKER 3 16 "chug 2" 1 24 0 1 R ' + ids.guid("region") + " 0",
-        'MARKER 4 8 "hit" 0 0 1 B ' + ids.guid("marker") + " 0",
-    ])
+    lines.extend(
+        [
+            "  <TEMPOENVEX " + ids.guid("tempo"),
+            "    ACT 0 -1",
+            "    VIS 1 0 1",
+            "    ARM 0",
+            "    PT 0 120 1",
+            "    PT 16 140 1",
+            "  >",
+            'MARKER 1 0 "chug" 1 8 0 1 R ' + ids.guid("region") + " 0",
+            'MARKER 2 8 "open" 1 16 0 1 R ' + ids.guid("region") + " 0",
+            'MARKER 3 16 "chug 2" 1 24 0 1 R ' + ids.guid("region") + " 0",
+            'MARKER 4 8 "hit" 0 0 1 B ' + ids.guid("marker") + " 0",
+        ]
+    )
     for t in tracks:
         lines.extend(track_lines(ids, t))
     lines.append(">")
