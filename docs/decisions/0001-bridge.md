@@ -50,7 +50,7 @@ Phase 0 checks which REAPER bridge to build on: Reaper Daemon (MIT, Lua bridge i
 | 11 | Tempo map | Partial | `tempo_list_markers` works (140 bpm at 16 s). No beat-to-seconds conversion command. |
 | 12 | Project path, media | Pass | `project_get_info` returns the `.rpp` path (`file_path`); media via `item_get_all` `source_file`. |
 
-Tally, live: ReaperMCP 6 pass, 3 partial, 3 no. Reaper Daemon 6 pass (counting item 9 as mostly), 4 partial, 2 no.
+Tally, live: ReaperMCP 6 pass, 3 partial, 3 no. Reaper Daemon 6 pass, 4 partial (including the envelope item), 2 no.
 
 ## Comparison
 
