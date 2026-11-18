@@ -1,6 +1,6 @@
 # ADR 0001 — Bridge: fork Reaper Daemon
 
-Status: **proposed**, pending Gate 0 · Date: 2026-11-18 · REAPER 7.86 (macOS arm64)
+Status: **accepted** at Gate 0 (2026-11-18) · Date: 2026-11-18 · REAPER 7.86 (macOS arm64)
 
 ## Context
 

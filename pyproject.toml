@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "ruff", "lupa"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
