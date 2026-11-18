@@ -1,0 +1,91 @@
+# reaper-agent conventions — edit freely; the agent reads this on every run.
+# Colours: Okabe–Ito palette (colour-vision-deficiency safe) plus grey.
+# At most 8 families: more colours become hard to tell apart.
+
+families:
+  # order = top-to-bottom track order in a tidied project
+  - code: DRM
+    name: Drums and percussion
+    order: 1
+    color: "#0072B2"   # blue
+    keywords: [kick, kik, bd, snare, snr, sd, hat, hh, hihat, tom, oh, overhead, room, ride, crash, cymbal, perc, shaker, tamb, clap, drum, drums, kit]
+    plugins: [Superior Drummer, EZdrummer]
+  - code: BAS
+    name: Bass
+    order: 2
+    color: "#CC79A7"   # reddish purple
+    keywords: [bass, bss, sub, "808"]
+    plugins: [EZbass]
+  - code: GTR
+    name: Guitars
+    order: 3
+    color: "#009E73"   # bluish green
+    keywords: [gtr, guitar, gt, rhythm, rhy, lead, solo, acoustic, ac, clean, crunch, amp, cab]
+    plugins: []
+  - code: KEY
+    name: Keys and synths
+    order: 4
+    color: "#E69F00"   # orange
+    keywords: [keys, key, piano, pno, organ, rhodes, synth, syn, pad, arp, string, strings]
+    plugins: [EZkeys]
+  - code: VOX
+    name: Vocals
+    order: 5
+    color: "#F0E442"   # yellow
+    keywords: [vox, vocal, vocals, voc, vo, voice, bv, bvs, backing, harmony, choir, scream]
+    plugins: []
+  - code: FX
+    name: FX returns
+    order: 6
+    color: "#56B4E9"   # sky blue
+    keywords: [reverb, verb, rev, plate, hall, delay, dly, echo, chorus, fx, return]
+    plugins: []
+  - code: BUS
+    name: Other buses (not folders)
+    order: 7
+    color: "#D55E00"   # vermillion
+    keywords: [bus, group, grp, sum, mix bus, parallel, pcomp]
+    plugins: []
+  - code: REF
+    name: Reference and utility
+    order: 8
+    color: "#999999"   # grey
+    keywords: [ref, reference, click, metronome, guide, scratch, cue, print]
+    plugins: []
+
+classifier:
+  min_confidence: 0.6        # below this the agent asks the user
+  weights:                   # higher wins
+    user_override: 1.0
+    instrument_plugin: 0.9
+    track_name: 0.7
+    source_filename: 0.5
+    parent_folder: 0.4
+    routing: 0.3
+
+naming:
+  pattern: "{code} {part} {source} {side}"   # empty fields are dropped
+  parts:   [Kick, Snare, Hat, Tom, OH, Room, Ride, Crash, Perc, Rhythm, Lead, Solo, Clean, Acoustic, Lead Vox, BV, Pad, Piano, Organ, Synth]
+  sources: [In, Out, Top, Bottom, Close, Room, DI, Amp, Mic, Sub]
+  sides:   [L, R, C]
+  unparsed: keep_after_code   # "Audio 07" -> "GTR Audio 07" once classified
+  duplicate_suffix: " {n}"
+  take_pattern: "{track} T{n}"
+  rename_takes_only_if: [empty, raw_filename]
+
+folders:
+  create_per_family_when_tracks_at_least: 2
+  folder_name: "BUS {family_name_short}"   # e.g. "BUS Guitars"
+  folder_color: family                     # folders take their family colour
+  only_fold_tracks_routed_directly_to_master: true
+
+takes:
+  flag_empty: true
+  flag_offline: true
+  flag_peak_below_dbfs: -60
+  move_to_fixed_lanes: ask      # ask | always | never
+
+safety:
+  dry_run_default: true
+  never_delete: true
+  save_originals_in_ext_state: true
