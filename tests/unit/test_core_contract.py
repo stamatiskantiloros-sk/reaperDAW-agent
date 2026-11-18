@@ -212,3 +212,12 @@ def test_hash_tolerates_float_noise_below_six_decimals():
     b = make_snapshot()
     b.items[0].length += 1e-9
     assert hashing.snapshot_hash(a) == hashing.snapshot_hash(b)
+
+
+def test_empty_lua_array_is_accepted_for_dict_fields():
+    data = make_snapshot().to_dict()
+    data["project"]["agent_ext"] = []  # how the Lua JSON encoder writes an empty table
+    assert Snapshot.from_dict(data).project.agent_ext == {}
+    data["project"]["agent_ext"] = [1]
+    with pytest.raises(ValueError):
+        Snapshot.from_dict(data)

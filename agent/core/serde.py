@@ -45,6 +45,8 @@ def from_dict(tp: Any, value: Any, path: str = "") -> Any:
         (item,) = get_args(tp)
         return [from_dict(item, v, f"{path}[{i}]") for i, v in enumerate(value)]
     if origin is dict:
+        if value == []:  # Lua's JSON encoder writes an empty table as []
+            return {}
         if not isinstance(value, dict):
             _fail(path, f"expected object, got {type(value).__name__}")
         _, vt = get_args(tp)
